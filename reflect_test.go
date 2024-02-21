@@ -675,3 +675,43 @@ func TestJSONSchemaAlias(t *testing.T) {
 	compareSchemaOutput(t, "fixtures/schema_alias.json", r, &AliasObjectB{})
 	compareSchemaOutput(t, "fixtures/schema_alias_2.json", r, &AliasObjectC{})
 }
+
+type JSONSchemaByValue struct {
+	PropertyNames  []string
+	PropertyValues map[string]any
+}
+
+func (jsbv JSONSchemaByValue) MarshalJSON() ([]byte, error) {
+	return json.Marshal(jsbv.PropertyValues)
+}
+
+func (jsbv JSONSchemaByValue) JSONSchema() *Schema {
+	baseSchema := &Schema{
+		Type:                 "object",
+		Properties:           NewProperties(),
+		AdditionalProperties: FalseSchema,
+		Required:             jsbv.PropertyNames,
+	}
+
+	for i := range jsbv.PropertyNames {
+		propertySchema := Reflect(jsbv.PropertyValues[jsbv.PropertyNames[i]])
+		// Required to get rid of the $schema on properties.
+		propertySchema.Version = ""
+		baseSchema.Properties.Set(jsbv.PropertyNames[i], propertySchema)
+	}
+
+	return baseSchema
+}
+
+func TestJSONSchemaByValue(t *testing.T) {
+	r := &Reflector{}
+	val := JSONSchemaByValue{
+		PropertyNames: []string{"field1", "field2"},
+		PropertyValues: map[string]any{
+			"field1": "yes",
+			"field2": "no",
+		},
+	}
+	compareSchemaOutput(t, "fixtures/schema_by_value.json", r, val)
+	compareSchemaOutput(t, "fixtures/schema_by_value_pointer.json", r, &val)
+}
