@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/invopop/jsonschema/json-schema-by-value",
+  "$ref": "#/$defs/JSONSchemaByValue",
+  "$defs": {
+    "JSONSchemaByValue": {
+      "properties": {
+        "field1": {
+          "type": "string"
+        },
+        "field2": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "field1",
+        "field2"
+      ]
+    }
+  }
+}

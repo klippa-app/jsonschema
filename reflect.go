@@ -24,6 +24,13 @@ type customSchemaImpl interface {
 	JSONSchema() *Schema
 }
 
+// customInterceptorSchemaImpl is used in a similar fashion to customSchemaImpl,
+// however it provides reflect callback so that you only need to provide the alternate
+// schema for the current node, and can hand reflection of children back to jsonschema.
+type customInterceptorSchemaImpl interface {
+	JSONSchema(func(any) *Schema) *Schema
+}
+
 // Function to be run after the schema has been generated.
 // this will let you modify a schema afterwards
 type extendSchemaImpl interface {
@@ -47,6 +54,7 @@ var customAliasSchema = reflect.TypeOf((*aliasSchemaImpl)(nil)).Elem()
 var customPropertyAliasSchema = reflect.TypeOf((*propertyAliasSchemaImpl)(nil)).Elem()
 
 var customType = reflect.TypeOf((*customSchemaImpl)(nil)).Elem()
+var customInterceptorType = reflect.TypeOf((*customInterceptorSchemaImpl)(nil)).Elem()
 var extendType = reflect.TypeOf((*extendSchemaImpl)(nil)).Elem()
 
 // customSchemaGetFieldDocString
@@ -60,13 +68,19 @@ var customStructGetFieldDocString = reflect.TypeOf((*customSchemaGetFieldDocStri
 
 // Reflect reflects to Schema from a value using the default Reflector
 func Reflect(v any) *Schema {
-	return ReflectFromType(reflect.TypeOf(v))
+	return ReflectFromValue(reflect.ValueOf(v))
 }
 
 // ReflectFromType generates root schema using the default Reflector
 func ReflectFromType(t reflect.Type) *Schema {
 	r := &Reflector{}
 	return r.ReflectFromType(t)
+}
+
+// ReflectFromValue generates root schema using the default Reflector
+func ReflectFromValue(v reflect.Value) *Schema {
+	r := &Reflector{}
+	return r.ReflectFromValue(v)
 }
 
 // A Reflector reflects values into a Schema.
@@ -162,13 +176,29 @@ type Reflector struct {
 
 // Reflect reflects to Schema from a value.
 func (r *Reflector) Reflect(v any) *Schema {
-	return r.ReflectFromType(reflect.TypeOf(v))
+	return r.ReflectFromValue(reflect.ValueOf(v))
 }
 
-// ReflectFromType generates root schema
+// ReflectFromType generates a root schema from a reflected type.
 func (r *Reflector) ReflectFromType(t reflect.Type) *Schema {
+	return r.reflect(t, reflect.ValueOf(nil))
+}
+
+// ReflectFromValue generates a root schema from a reflected value.
+func (r *Reflector) ReflectFromValue(v reflect.Value) *Schema {
+	return r.reflect(v.Type(), v)
+}
+
+// reflect generates a root schema from a reflected type and value.
+func (r *Reflector) reflect(t reflect.Type, v reflect.Value) *Schema {
+	// Re-assign from pointer.
 	if t.Kind() == reflect.Ptr {
-		t = t.Elem() // re-assign from pointer
+		t = t.Elem()
+
+		// Only re-assign value when we have a value.
+		if v.IsValid() {
+			v = v.Elem()
+		}
 	}
 
 	name := r.typeName(t)
@@ -176,7 +206,7 @@ func (r *Reflector) ReflectFromType(t reflect.Type) *Schema {
 	s := new(Schema)
 	definitions := Definitions{}
 	s.Definitions = definitions
-	bs := r.reflectTypeToSchemaWithID(definitions, t)
+	bs := r.reflectTypeToSchemaWithID(definitions, t, v)
 	if r.ExpandedStruct {
 		*s = *definitions[name]
 		delete(definitions, name)
@@ -234,7 +264,7 @@ func (r *Reflector) SetBaseSchemaID(id string) {
 	r.BaseSchemaID = ID(id)
 }
 
-func (r *Reflector) refOrReflectTypeToSchema(definitions Definitions, t reflect.Type) *Schema {
+func (r *Reflector) refOrReflectTypeToSchema(definitions Definitions, t reflect.Type, v reflect.Value) *Schema {
 	id := r.lookupID(t)
 	if id != EmptyID {
 		return &Schema{
@@ -247,11 +277,11 @@ func (r *Reflector) refOrReflectTypeToSchema(definitions Definitions, t reflect.
 		return def
 	}
 
-	return r.reflectTypeToSchemaWithID(definitions, t)
+	return r.reflectTypeToSchemaWithID(definitions, t, v)
 }
 
-func (r *Reflector) reflectTypeToSchemaWithID(defs Definitions, t reflect.Type) *Schema {
-	s := r.reflectTypeToSchema(defs, t)
+func (r *Reflector) reflectTypeToSchemaWithID(defs Definitions, t reflect.Type, v reflect.Value) *Schema {
+	s := r.reflectTypeToSchema(defs, t, v)
 	if s != nil {
 		if r.Lookup != nil {
 			id := r.Lookup(t)
@@ -263,19 +293,25 @@ func (r *Reflector) reflectTypeToSchemaWithID(defs Definitions, t reflect.Type) 
 	return s
 }
 
-func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type) *Schema {
+func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type, v reflect.Value) *Schema {
 	// only try to reflect non-pointers
 	if t.Kind() == reflect.Ptr {
-		return r.refOrReflectTypeToSchema(definitions, t.Elem())
+		if v.IsValid() {
+			v = v.Elem()
+		}
+		return r.refOrReflectTypeToSchema(definitions, t.Elem(), v)
 	}
 
 	// Check if the there is an alias method that provides an object
 	// that we should use instead of this one.
 	if t.Implements(customAliasSchema) {
-		v := reflect.New(t)
-		o := v.Interface().(aliasSchemaImpl)
-		t = reflect.TypeOf(o.JSONSchemaAlias())
-		return r.refOrReflectTypeToSchema(definitions, t)
+		tv := reflect.New(t)
+		if v.IsValid() {
+			tv = v
+		}
+		o := tv.Interface().(aliasSchemaImpl)
+		aliasVal := reflect.ValueOf(o.JSONSchemaAlias())
+		return r.refOrReflectTypeToSchema(definitions, aliasVal.Type(), aliasVal)
 	}
 
 	// Do any pre-definitions exist?
@@ -284,7 +320,7 @@ func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type)
 			return t
 		}
 	}
-	if rt := r.reflectCustomSchema(definitions, t); rt != nil {
+	if rt := r.reflectCustomSchema(definitions, t, v); rt != nil {
 		return rt
 	}
 
@@ -313,7 +349,7 @@ func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type)
 
 	switch t.Kind() {
 	case reflect.Struct:
-		r.reflectStruct(definitions, t, st)
+		r.reflectStruct(definitions, t, v, st)
 
 	case reflect.Slice, reflect.Array:
 		r.reflectSliceOrArray(definitions, t, st)
@@ -351,15 +387,38 @@ func (r *Reflector) reflectTypeToSchema(definitions Definitions, t reflect.Type)
 	return st
 }
 
-func (r *Reflector) reflectCustomSchema(definitions Definitions, t reflect.Type) *Schema {
+func (r *Reflector) reflectCustomSchema(definitions Definitions, t reflect.Type, v reflect.Value) *Schema {
 	if t.Kind() == reflect.Ptr {
-		return r.reflectCustomSchema(definitions, t.Elem())
+		if v.IsValid() {
+			v = v.Elem()
+		}
+		return r.reflectCustomSchema(definitions, t.Elem(), v)
 	}
 
 	if t.Implements(customType) {
-		v := reflect.New(t)
-		o := v.Interface().(customSchemaImpl)
+		tv := reflect.New(t)
+		if v.IsValid() {
+			tv = v
+		}
+		o := tv.Interface().(customSchemaImpl)
 		st := o.JSONSchema()
+		r.addDefinition(definitions, t, st)
+		if ref := r.refDefinition(definitions, t); ref != nil {
+			return ref
+		}
+		return st
+	}
+
+	if t.Implements(customInterceptorType) {
+		tv := reflect.New(t)
+		if v.IsValid() {
+			tv = v
+		}
+		o := tv.Interface().(customInterceptorSchemaImpl)
+		st := o.JSONSchema(func(t any) *Schema {
+			tVal := reflect.ValueOf(t)
+			return r.refOrReflectTypeToSchema(definitions, tVal.Type(), tVal)
+		})
 		r.addDefinition(definitions, t, st)
 		if ref := r.refDefinition(definitions, t); ref != nil {
 			return ref
@@ -405,7 +464,7 @@ func (r *Reflector) reflectSliceOrArray(definitions Definitions, t reflect.Type,
 		st.ContentEncoding = "base64"
 	} else {
 		st.Type = "array"
-		st.Items = r.refOrReflectTypeToSchema(definitions, t.Elem())
+		st.Items = r.refOrReflectTypeToSchema(definitions, t.Elem(), reflect.ValueOf(nil))
 	}
 }
 
@@ -420,18 +479,18 @@ func (r *Reflector) reflectMap(definitions Definitions, t reflect.Type, st *Sche
 	switch t.Key().Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		st.PatternProperties = map[string]*Schema{
-			"^[0-9]+$": r.refOrReflectTypeToSchema(definitions, t.Elem()),
+			"^[0-9]+$": r.refOrReflectTypeToSchema(definitions, t.Elem(), reflect.ValueOf(nil)),
 		}
 		st.AdditionalProperties = FalseSchema
 		return
 	}
 	if t.Elem().Kind() != reflect.Interface {
-		st.AdditionalProperties = r.refOrReflectTypeToSchema(definitions, t.Elem())
+		st.AdditionalProperties = r.refOrReflectTypeToSchema(definitions, t.Elem(), reflect.ValueOf(nil))
 	}
 }
 
 // Reflects a struct to a JSON Schema type.
-func (r *Reflector) reflectStruct(definitions Definitions, t reflect.Type, s *Schema) {
+func (r *Reflector) reflectStruct(definitions Definitions, t reflect.Type, v reflect.Value, s *Schema) {
 	// Handle special types
 	switch t {
 	case timeType: // date-time RFC section 7.3.1
@@ -463,13 +522,16 @@ func (r *Reflector) reflectStruct(definitions Definitions, t reflect.Type, s *Sc
 		}
 	}
 	if !ignored {
-		r.reflectStructFields(s, definitions, t)
+		r.reflectStructFields(s, definitions, t, v)
 	}
 }
 
-func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t reflect.Type) {
+func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t reflect.Type, v reflect.Value) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
+		if v.IsValid() {
+			v = v.Elem()
+		}
 	}
 	if t.Kind() != reflect.Struct {
 		return
@@ -477,8 +539,11 @@ func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t r
 
 	var getFieldDocString customGetFieldDocString
 	if t.Implements(customStructGetFieldDocString) {
-		v := reflect.New(t)
-		o := v.Interface().(customSchemaGetFieldDocString)
+		tv := reflect.New(t)
+		if v.IsValid() {
+			tv = v
+		}
+		o := tv.Interface().(customSchemaGetFieldDocString)
 		getFieldDocString = o.GetFieldDocString
 	}
 
@@ -486,18 +551,21 @@ func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t r
 		return nil
 	}
 	if t.Implements(customPropertyAliasSchema) {
-		v := reflect.New(t)
-		o := v.Interface().(propertyAliasSchemaImpl)
+		tv := reflect.New(t)
+		if v.IsValid() {
+			tv = v
+		}
+		o := tv.Interface().(propertyAliasSchemaImpl)
 		customPropertyMethod = o.JSONSchemaProperty
 	}
 
-	handleField := func(f reflect.StructField) {
+	handleField := func(f reflect.StructField, v reflect.Value) {
 		name, shouldEmbed, required, nullable := r.reflectFieldName(f)
 		// if anonymous and exported type should be processed recursively
 		// current type should inherit properties of anonymous one
 		if name == "" {
 			if shouldEmbed {
-				r.reflectStructFields(st, definitions, f.Type)
+				r.reflectStructFields(st, definitions, f.Type, v)
 			}
 			return
 		}
@@ -506,9 +574,10 @@ func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t r
 		// the provided object's type instead of the field's type.
 		var property *Schema
 		if alias := customPropertyMethod(name); alias != nil {
-			property = r.refOrReflectTypeToSchema(definitions, reflect.TypeOf(alias))
+			aliasVal := reflect.ValueOf(alias)
+			property = r.refOrReflectTypeToSchema(definitions, aliasVal.Type(), aliasVal)
 		} else {
-			property = r.refOrReflectTypeToSchema(definitions, f.Type)
+			property = r.refOrReflectTypeToSchema(definitions, f.Type, v)
 		}
 
 		property.structKeywordsFromTags(f, st, name)
@@ -538,12 +607,16 @@ func (r *Reflector) reflectStructFields(st *Schema, definitions Definitions, t r
 
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		handleField(f)
+		fieldVal := reflect.ValueOf(nil)
+		if v.IsValid() {
+			fieldVal = v.Field(i)
+		}
+		handleField(f, fieldVal)
 	}
 	if r.AdditionalFields != nil {
 		if af := r.AdditionalFields(t); af != nil {
 			for _, sf := range af {
-				handleField(sf)
+				handleField(sf, reflect.ValueOf(nil))
 			}
 		}
 	}
@@ -609,7 +682,10 @@ func (r *Reflector) lookupID(t reflect.Type) ID {
 }
 
 func (t *Schema) structKeywordsFromTags(f reflect.StructField, parent *Schema, propertyName string) {
-	t.Description = f.Tag.Get("jsonschema_description")
+	description, ok := f.Tag.Lookup("jsonschema_description")
+	if ok {
+		t.Description = description
+	}
 
 	tags := splitOnUnescapedCommas(f.Tag.Get("jsonschema"))
 	tags = t.genericKeywords(tags, parent, propertyName)
