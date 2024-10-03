@@ -1078,6 +1078,21 @@ func (t *Schema) UnmarshalJSON(data []byte) error {
 	}{
 		SchemaAlt: (*SchemaAlt)(t),
 	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	for key, value := range fields {
+		if strings.HasPrefix(key, "x-") {
+			if aux.Extras == nil {
+				aux.Extras = map[string]any{}
+			}
+			aux.Extras[key] = value
+		}
+	}
+
 	return json.Unmarshal(data, aux)
 }
 
