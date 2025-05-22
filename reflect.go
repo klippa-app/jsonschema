@@ -432,6 +432,9 @@ func (r *Reflector) reflectCustomSchema(definitions Definitions, t reflect.Type,
 func (r *Reflector) reflectSchemaExtend(definitions Definitions, t reflect.Type, s *Schema) *Schema {
 	if t.Implements(extendType) {
 		v := reflect.New(t)
+		if v.Kind() == reflect.Ptr {
+			v = v.Elem()
+		}
 		o := v.Interface().(extendSchemaImpl)
 		o.JSONSchemaExtend(s)
 		if ref := r.refDefinition(definitions, t); ref != nil {
