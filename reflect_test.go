@@ -715,3 +715,56 @@ func TestJSONSchemaByValue(t *testing.T) {
 	compareSchemaOutput(t, "fixtures/schema_by_value.json", r, val)
 	compareSchemaOutput(t, "fixtures/schema_by_value_pointer.json", r, &val)
 }
+
+func TestUnmarshalTypeArray(t *testing.T) {
+	raw := []byte(`{
+		"type": "object",
+		"properties": {
+			"expiry": {
+				"type": ["string", "null"],
+				"format": "date",
+				"description": "optional expiry date"
+			},
+			"name": {"type": "string"}
+		}
+	}`)
+
+	schema := new(Schema)
+	require.NoError(t, schema.UnmarshalJSON(raw))
+	assert.Equal(t, "object", schema.Type)
+
+	expiry, ok := schema.Properties.Get("expiry")
+	require.True(t, ok)
+	assert.Empty(t, expiry.Type)
+	require.Len(t, expiry.AnyOf, 2)
+	assert.Equal(t, "string", expiry.AnyOf[0].Type)
+	assert.Equal(t, "null", expiry.AnyOf[1].Type)
+	assert.Equal(t, "date", expiry.Format)
+	assert.Equal(t, "optional expiry date", expiry.Description)
+
+	name, ok := schema.Properties.Get("name")
+	require.True(t, ok)
+	assert.Equal(t, "string", name.Type)
+}
+
+func TestUnmarshalTypeArrayWithExistingAnyOf(t *testing.T) {
+	raw := []byte(`{
+		"type": ["integer", "null"],
+		"anyOf": [{"minimum": 0}, {"maximum": -10}]
+	}`)
+
+	schema := new(Schema)
+	require.NoError(t, schema.UnmarshalJSON(raw))
+	assert.Empty(t, schema.Type)
+	require.Len(t, schema.AnyOf, 2)
+	require.Len(t, schema.AllOf, 1)
+	require.Len(t, schema.AllOf[0].AnyOf, 2)
+	assert.Equal(t, "integer", schema.AllOf[0].AnyOf[0].Type)
+	assert.Equal(t, "null", schema.AllOf[0].AnyOf[1].Type)
+}
+
+func TestUnmarshalTypeInvalid(t *testing.T) {
+	schema := new(Schema)
+	require.Error(t, schema.UnmarshalJSON([]byte(`{"type": 5}`)))
+	require.Error(t, schema.UnmarshalJSON([]byte(`{"type": [5]}`)))
+}

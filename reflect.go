@@ -1154,6 +1154,9 @@ func (t *Schema) UnmarshalJSON(data []byte) error {
 	type SchemaAlt Schema
 	aux := &struct {
 		*SchemaAlt
+		// Shadows Schema.Type to accept both the string form ("string") and the
+		// array-union form (["string", "null"]) of the JSON Schema type keyword.
+		Type json.RawMessage `json:"type,omitempty"`
 	}{
 		SchemaAlt: (*SchemaAlt)(t),
 	}
@@ -1172,7 +1175,39 @@ func (t *Schema) UnmarshalJSON(data []byte) error {
 		}
 	}
 
-	return json.Unmarshal(data, aux)
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	return t.unmarshalType(aux.Type)
+}
+
+// unmarshalType assigns the type keyword: a string assigns Type directly; an array
+// (type union, e.g. ["string", "null"]) is normalized to anyOf branches — merged as
+// an allOf member when the schema already carries its own anyOf, so both apply.
+func (t *Schema) unmarshalType(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	if raw[0] == '"' {
+		return json.Unmarshal(raw, &t.Type)
+	}
+
+	var types []string
+	if err := json.Unmarshal(raw, &types); err != nil {
+		return err
+	}
+
+	branches := make([]*Schema, 0, len(types))
+	for _, typ := range types {
+		branches = append(branches, &Schema{Type: typ})
+	}
+	if len(t.AnyOf) == 0 {
+		t.AnyOf = branches
+	} else {
+		t.AllOf = append(t.AllOf, &Schema{AnyOf: branches})
+	}
+	return nil
 }
 
 // MarshalJSON is used to serialize a schema object or boolean.
